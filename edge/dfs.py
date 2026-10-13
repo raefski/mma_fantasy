@@ -97,7 +97,7 @@ def mlb_draft_groups() -> list[dict]:
 #: the snapshot writer filtered on a bare 408 while the reader looked for all
 #: three, so college and NASCAR snapshots reached Streamlit Cloud with the FPPG
 #: column already thrown away.
-FPPG_STAT_IDS = (408, 174, 653)
+FPPG_STAT_IDS = (408, 174, 653, 635, 341)  # 635: MMA's "per fight"; 341: NHL (2026-09-28)
 
 
 def fetch_draftables(draft_group_id: int) -> dict[str, dict]:
@@ -140,11 +140,56 @@ def fetch_draftables(draft_group_id: int) -> dict[str, dict]:
                       # DK's own player id. For NASCAR this IS NASCAR's
                       # driver_id (Larson 4030 in both), which is the exact
                       # join edge/dfs_run_nascar.py relies on.
-                      "player_id": p.get("playerId")}
+                      "player_id": p.get("playerId"),
+                      # "OUT" / "IR" / "O" when DraftKings itself has ruled him out.
+                      "dk_status": (p.get("status") or "").upper() or None}
     return out
 
 
 _SNAP_DIR = __import__("pathlib").Path(__file__).resolve().parents[1] / "data" / "draftables_snapshot"
+
+class SalaryLookup:
+    """Find a sportsbook subject in fetch_draftables' salaries, suffix-tolerant.
+
+    Salaries are keyed with norm(), which KEEPS "Jr."/"Sr."/"III"; the books do
+    not agree on suffixes. On 2026-09-27 DraftKings' own sportsbook listed
+    "James Cook", "Deebo Samuel", "Chris Godwin" and "Aaron Jones" while DK's
+    DFS board had "James Cook III", "Deebo Samuel Sr.", ... -- seven NFL main-
+    slate players silently fell out of the pool, as ten college players had
+    the night before. The exact key is tried FIRST, so every name that matched
+    before matches identically; the suffix-free key is only a fallback, and a
+    suffix-free key two DK players share is never guessed.
+    """
+
+    def __init__(self, salaries: dict):
+        from edge.names import norm as _bare
+        self._bare = _bare
+        self.exact = salaries
+        self.bare: dict = {}
+        dup: set = set()
+        for info in salaries.values():
+            k = _bare(info.get("name") or "")
+            if k in self.bare:
+                dup.add(k)
+            self.bare[k] = info
+        for k in dup:
+            self.bare.pop(k, None)
+        self.ambiguous = sorted(dup)
+
+    def get(self, name: str):
+        return self.exact.get(norm(name)) or self.bare.get(self._bare(name))
+
+
+class DraftablesUnavailable(RuntimeError):
+    """No salaries for a draft group: the live call failed AND no snapshot exists.
+
+    On Streamlit Cloud (datacenter IP, always 403'd) that almost always means DK
+    has not PRICED the slate yet -- the desktop only publishes a snapshot once
+    salaries exist. Every build_slate turns this into {"unpriced": True}; before
+    this it surfaced as a raw 403 traceback ("Build failed") on the phone for
+    NCAAF, NASCAR and MMA on 2026-09-26, each time for next week's slate.
+    """
+
 
 # "live" | "snapshot <when>" | "failed" -- set by _draftables_raw so a caller
 # (the Streamlit pages, scripts/draftables_publish.py) can tell the user which
@@ -191,7 +236,16 @@ def _draftables_raw(draft_group_id: int) -> list[dict]:
                   file=sys.stderr)
             return found.json()
         LAST_DRAFTABLES_SOURCE = "failed"
-        raise
+        raise DraftablesUnavailable(
+            f"DraftKings salaries for draft group {draft_group_id} are not "
+            f"available here: the live request failed ({type(exc).__name__}) "
+            "and no snapshot has been published. Usually DK has not priced "
+            "this slate yet.") from exc
+
+
+#: playerGameAttributes the snapshot keeps: MMA fight number (115, 1 = main
+#: event) and weigh-in weight (150). See edge/dfs_run_mma.py.
+SNAPSHOT_GAME_ATTR_IDS = (115, 150)
 
 
 def save_draftables_snapshot(draft_group_id: int) -> int:
@@ -210,6 +264,10 @@ def save_draftables_snapshot(draft_group_id: int) -> int:
     # threaten that.
     keep = ("displayName", "salary", "position", "teamAbbreviation",
             "competition", "draftStatAttributes", "playerId")
+    # MMA reads fight order and weigh-in weight (playerGameAttributes 115 and
+    # 150) and a scratch flag; without them Cloud's MMA board was built from
+    # less than the desktop's. Kept only when present, so no other sport's
+    # snapshot changes.
     rows, seen = [], set()
     for p in _get(url).get("draftables", []):
         r = {k: p.get(k) for k in keep}
@@ -219,6 +277,12 @@ def save_draftables_snapshot(draft_group_id: int) -> int:
         # the writer and the reader cannot disagree about which ids matter.
         r["draftStatAttributes"] = [a for a in (r["draftStatAttributes"] or [])
                                     if a.get("id") in FPPG_STAT_IDS]
+        extra = [a for a in (p.get("playerGameAttributes") or [])
+                 if a.get("id") in SNAPSHOT_GAME_ATTR_IDS]
+        if extra:
+            r["playerGameAttributes"] = extra
+        if p.get("isDisabled"):
+            r["isDisabled"] = True
         key = json.dumps(r, sort_keys=True)
         if key not in seen:  # exact dupes only -- fetch_draftables' first-row-wins stays identical
             seen.add(key)
@@ -1027,7 +1091,7 @@ def team_game_status(date: str) -> dict:
                 # "A" etc, confirmed real: 2026-07-14) has "AL"/"NL" in place of
                 # a real team abbreviation, which isn't a crash but would
                 # pollute this dict with bogus non-DK-team keys.
-                if g.get("gameType", "R") != "R":
+                if g.get("gameType", "R") not in _REAL_TYPES:
                     continue
                 detail = g.get("status", {}).get("detailedState", "")
                 flag = "" if detail in _NORMAL_GAME_STATES else detail
@@ -1067,7 +1131,10 @@ def lineups_for_date(date: str, project: bool = True) -> dict:
     # regular season only -- an All-Star/exhibition entry (gameType "A" etc,
     # confirmed real: 2026-07-14) uses "AL"/"NL" pseudo-teams that won't
     # collide with real team ids, but there's no reason to process it at all.
-    games = [g for d in s.get("dates", []) for g in d.get("games", []) if g.get("gameType", "R") == "R"]
+    # POSTSEASON INCLUDED (F/D/L/W): this used to keep only "R", so on the first
+    # Division Series day (2026-10-03) it returned ZERO players and no hitter
+    # pool could be built at all.
+    games = [g for d in s.get("dates", []) for g in d.get("games", []) if g.get("gameType", "R") in _REAL_TYPES]
 
     # Doubleheaders: a team can appear in 2 games the same date. Without this,
     # a finished game 1's CONFIRMED lineup gets keyed by player name same as
@@ -1105,14 +1172,44 @@ def lineups_for_date(date: str, project: bool = True) -> dict:
                     out[(team_id, norm(pl["fullName"]))] = {"id": pl["id"], "name": pl["fullName"], "slot": i + 1,
                                                  "team_id": team_id, "park_team_id": home_id,
                                                  "opp_pitcher_id": opp_pid, "opp_team_id": opp_team_id,
-                                                 "game": g["gamePk"], "confirmed": True}
+                                                 "game": g["gamePk"], "confirmed": True, "p_start": 1.0}
             elif project:
-                for pid, name, slot in _team_recent_lineup(team_id, date):
-                    if (team_id, norm(name)) not in out:
-                        out[(team_id, norm(name))] = {"id": pid, "name": name, "slot": slot, "team_id": team_id,
-                                           "park_team_id": home_id, "opp_pitcher_id": opp_pid,
-                                           "opp_team_id": opp_team_id, "game": g["gamePk"], "confirmed": False}
+                nine = _projected_nine(team_id, date, opp_pid)
+                if not nine:   # no history to predict from: the old last-game fallback
+                    nine = [{"id": pid, "name": name, "slot": slot, "p_start": 1.0}
+                            for pid, name, slot in _team_recent_lineup(team_id, date)]
+                for pl in nine:
+                    if (team_id, norm(pl["name"])) not in out:
+                        out[(team_id, norm(pl["name"]))] = {
+                            "id": pl["id"], "name": pl["name"], "slot": pl["slot"], "team_id": team_id,
+                            "park_team_id": home_id, "opp_pitcher_id": opp_pid,
+                            "opp_team_id": opp_team_id, "game": g["gamePk"], "confirmed": False,
+                            "p_start": pl["p_start"]}
     return out
+
+
+_REAL_TYPES = {"R", "F", "D", "L", "W"}   # regular season + every postseason round
+_HISTORY_MEMO: dict = {}
+
+
+def _projected_nine(team_id, date: str, opp_pitcher_id) -> list[dict]:
+    """Platoon-aware projected batting order for a team whose lineup is not
+    posted (edge/dfs_lineup_projection.py). [] when there is too little history."""
+    from edge import dfs_lineup_projection as lp
+    try:
+        if date not in _HISTORY_MEMO:
+            _HISTORY_MEMO.clear()
+            _HISTORY_MEMO[date] = lp.fetch_history(date)
+        hist = _HISTORY_MEMO[date]
+        games = lp.team_games(hist, team_id)
+        if len(games) < 5:
+            return []
+        ids = {sp for g in games for sp in [g["opp_sp"]] if sp} | ({opp_pitcher_id} if opp_pitcher_id else set())
+        hands = player_hands(ids, cache_path=str(_os.path.join(_os.path.dirname(__file__), "..", "data", "dfs_hands.json")))
+        opp_hand = (hands.get(str(opp_pitcher_id)) or {}).get("throw") if opp_pitcher_id else None
+        return lp.predict_lineup(games, opp_hand, hands)
+    except Exception:
+        return []
 
 
 import datetime as _dt

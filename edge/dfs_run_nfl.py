@@ -291,8 +291,9 @@ def build_pool(client, salaries: dict, book: str = "draftkings") -> tuple[list, 
     stats = {"offense": 0, "dst": 0, "no_proj": 0, "no_salary": 0,
              "not_on_slate": 0, **line_report}
 
+    lookup = dfs.SalaryLookup(salaries)
     for name, markets in props.items():
-        info = salaries.get(dfs.norm(name))
+        info = lookup.get(name)
         if not info:
             stats["not_on_slate"] += 1
             continue
@@ -310,7 +311,7 @@ def build_pool(client, salaries: dict, book: str = "draftkings") -> tuple[list, 
             "salary": info["salary"], "proj": res["proj"], "team": team,
             "opp_team": opp, "game": gid, "dk_pos": info.get("position") or "",
             "components": res.get("components", {}), "means": res.get("means", {}),
-            "dk_fppg": info.get("dk_fppg"),
+            "imputed": res.get("imputed", []), "dk_fppg": info.get("dk_fppg"),
         })
         stats["offense"] += 1
 
@@ -429,7 +430,12 @@ def log_forward_test(pool: list, cash: dict | None, gpp: dict | None,
     with plog.open("w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(list(PROJ_LOG_COLS))
-        for r in [r for r in prior if r.get("date") != date] + list(_rows()):
+        # Replace only THIS slate's rows. Dropping the whole date wiped the
+        # day's other slates -- NCAAF 2026-09-26 lost slate 153831's 106 rows
+        # when 153951 was built that evening.
+        for r in [r for r in prior
+                  if not (r.get("date") == date and str(r.get("gid")) == str(gid))
+                  ] + list(_rows()):
             w.writerow([r.get(c, "") for c in PROJ_LOG_COLS])
     result["logged"] = True
     result["n"] = len(pool)
@@ -446,6 +452,34 @@ def log_forward_test(pool: list, cash: dict | None, gpp: dict | None,
                                row["opp"], row["salary"], row["proj"], row["own"]])
         result["lineup_file"] = str(lpath.relative_to(root))
     return result
+
+
+BUZZ_FILE = Path(__file__).resolve().parents[1] / "data" / "buzz_nfl.csv"
+
+
+def attach_buzz(pool: list, date: str | None, path: Path = BUZZ_FILE) -> int:
+    """Give every player his YouTube mentions for this slate (scripts/buzz_nfl.py),
+    which edge.dfs_nfl_theory.add_ownership then uses. Returns how many buzz
+    rows the slate had; 0 leaves the pool untouched, so a slate nobody
+    collected buzz for gets the value-only field model exactly as before.
+
+    Read through repo_files, so the phone app sees a Sunday-morning collection
+    as soon as it is pushed rather than whenever Cloud next redeploys.
+    """
+    import io
+
+    from edge import repo_files
+    from edge.names import norm as bare
+    found = repo_files.read(path) if date else None
+    if found is None:
+        return 0
+    rows = [r for r in csv.DictReader(io.StringIO(found.data)) if r.get("date") == date]
+    if not rows:
+        return 0
+    mentions = {bare(r["player"]): float(r.get("mentions") or 0) for r in rows}
+    for p in pool:
+        p["buzz"] = mentions.get(bare(p["name"]), 0.0)
+    return len(rows)
 
 
 def build_slate(client, draft_group=None, iters: int = 700, book: str = "draftkings",
@@ -476,7 +510,11 @@ def build_slate(client, draft_group=None, iters: int = 700, book: str = "draftki
     if gid is None:
         return {"error": meta.get("error"), "slates": slates}
 
-    salaries = dfs.fetch_draftables(gid)
+    try:
+        salaries = dfs.fetch_draftables(gid)
+    except dfs.DraftablesUnavailable as exc:
+        return {"unpriced": True, "unpriced_reason": str(exc), "gid": gid,
+                "meta": meta, "slates": slates}
     priced = {k: v for k, v in salaries.items() if v.get("salary")}
     if not priced:
         # DK lists a slate before it prices it; that is normal a few days out
@@ -485,7 +523,14 @@ def build_slate(client, draft_group=None, iters: int = 700, book: str = "draftki
 
     pool, stats = build_pool(client, salaries, book=book)
     games = slate_games(salaries)
-    theory.add_ownership(pool, **({"gamma": own_gamma} if own_gamma else {}))
+    try:
+        stats["buzz_rows"] = attach_buzz(pool, _slate_date(meta))
+    except Exception as exc:                                # noqa: BLE001
+        # Buzz sharpens ownership; it must never stop a lineup being built.
+        log.warning("dfs_run_nfl: buzz unavailable: %s", exc)
+        stats["buzz_rows"] = 0
+    theory.add_ownership(pool, cap=theory.slate_cap(len(games)),
+                         **({"gamma": own_gamma} if own_gamma else {}))
 
     cash = dfs_opt_nfl.optimize(pool, mode="cash", iters=iters, seed=0)
     gpp = dfs_opt_nfl.optimize(pool, mode="gpp", iters=iters, seed=0,

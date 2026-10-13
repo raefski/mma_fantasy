@@ -10,7 +10,7 @@
 > ```
 >
 > An edit made here will be silently overwritten on the next mirror. Make it in
-> `edge_search` instead. Last mirrored 2026-09-26.
+> `edge_search` instead. Last mirrored 2026-10-13.
 
 MMA is priced where it matters most: DraftKings Sportsbook posts winner x method x round for every fight, and the win bonus is most of a DK MMA score. The build de-biases those prices (the method market underprices decisions), simulates whole fights, and scores lineups against a simulated field. Read `MMA_STATUS.md` first.
 

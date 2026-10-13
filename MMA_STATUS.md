@@ -16,7 +16,7 @@ Read off `api.draftkings.com/lineups/v1/gametypes/168/rules`.
 | Cap | $50,000 |
 | **Late swap** | **NOT ALLOWED.** Lock is the **first fight's** opening bell — the main event is 3–4 hours later |
 | DK lobby sport code | **`MMA`** (`UFC` returns every sport in the lobby) |
-| Classic game type id | **168**. 169 is Captain Mode (1.5× CPT, a separate late-card slate — not built), 373 is Snake (no cap) |
+| Game types built | **168 Classic** (the main card) and **169 Captain Mode** — DK's "(Late)" MMA slate: the late fights only, one CPT at 1.5× points for 1.5× salary. 373 is Snake (no cap, not built) |
 | FPPF stat id | **635** (`draftStatAttributes`) — a different id from every other sport |
 | Other board fields | `playerGameAttributes` 111 = opponent, **115 = fight number (1 = main event)**, **150 = weigh-in weight** |
 
@@ -197,12 +197,28 @@ but the optimiser may: on 2026-09-26 the cash lineup held both sides of the
 five-round main event (a guaranteed winner, and 25 minutes of stats for each).
 The page flags it.
 
-## 8. The field model — A PRIOR
+## 8. The field model — fitted on ONE slate
 
 Ownership is **how often a fighter appears in the lineups the field builds**,
 with every legal pair-free lineup weighted `exp((public projection − best)/τ)`.
-The public projection is 85% this model's and 15% DK's lobby FPPF. τ = 8 for
-GPP, 5 for cash (sharper).
+The public projection is 85% this model's and 15% DK's lobby FPPF. **τ = 16 for
+GPP, 8 for cash** (sharper).
+
+Both τ were guesses (8 and 5) until the first exports, from the 2026-09-26 late
+Captain slate:
+
+| contest | entries | prior τ | per-fighter ownership MAE | fitted τ | MAE |
+|---|---|---|---|---|---|
+| GPP 196092139 | 118 | 8 | 11.0 pts | **16** (flat 16–20) | 9.8 |
+| cash 196085371 | 20 | 5 | 16.2 pts | **8** | 13.6 |
+
+The field was **flatter than the prior** in both. It went lighter on the chalk
+this model liked (Perez 56% vs 81%, Vieira 42% vs 67%) and heavier on cheap
+underdogs (Bryczek 39% vs 8%, Dumont 25% vs 8%). The FPPF weight is not
+identified (0 and 0.15 fit equally); CPT-slot ownership was already close
+(3.3 pts). What no τ explains is Bryczek at 39%: the public is reading
+something this model does not see. One Captain slate is not a Classic main
+card — refit as exports arrive.
 
 This structure replaced a per-fighter softmax that produced **impossible
 boards**: an implied average lineup over the $50,000 cap, then 70% on BOTH
@@ -214,13 +230,13 @@ constants are one grid search away from fitted.
 
 | thing | status |
 |---|---|
-| **Ownership / the field** | a **PRIOR** (τ 8/5, FPPF weight 0.15). Never fitted to an MMA contest. **The first DK contest export is the most valuable file this build can receive** — `scripts/mma_calibration.py --fit-ownership`, cash and GPP separately |
+| **Ownership / the field** | fitted on **one** slate (a 118-entry GPP and a 20-entry cash game, Captain Mode). Classic main-card ownership is still extrapolated. Every export helps — `scripts/mma_calibration.py --fit-ownership`, cash and GPP separately |
 | **Lineup head-to-head** | the objectives are argued from a calibrated simulation, not from a backtest against real contest results. No historical DK MMA salaries were found. |
 | **Market constants on DK's own lines** | fitted on `ufc-master.csv` prices (a consensus source), applied to DraftKings'. DK's own pre-lock lines are now archived every capture for a refit. |
 | **Salary-implied fallback** | one card, eleven bouts |
 | **Sig-strike / takedown props** | parsed and captured but NOT used: their calibration is unmeasured. Displayed for reference in the log only |
 | **Round-and-Method grid** | parsed, not used for timing: the fitted hazard is validated, the grid's pricing is not |
-| **Captain Mode (169)** | not built |
+| **Captain Mode (169)** | built 2026-09-26 (exhaustive, 48,048 lineups on 8 fights). Same model; the CPT's field ownership is a prior like the rest |
 | **Weight-miss / short-notice effects** | not modelled beyond what the market prices |
 
 ## 10. Weekly checklist
@@ -264,10 +280,30 @@ python3 scripts/mma_fit.py --what timing --train-from 2019-01-01 --test-from 210
 | `tests/test_dfs_mma.py` | scoring, names, market, simulator invariants, field, optimiser |
 | `deploy/mma-odds-publish.{service,timer}` | the capture schedule |
 
-## 12. First card
+## 12. First card — 2026-09-26
 
-2026-09-26, UFC Apex, 12 fights (Rosas Jr. vs Barcelos). Built after DFS lock
-from sportsbook prices captured at 5:10 PM ET, before the first bell — logged to
-`data/dfs_proj_log_mma.csv` as the first forward test. Nothing was entered.
-Grade it with `--grade 2026-09-26 --refresh` once the UFCStats mirror has the
-card (about a day).
+UFC Apex, 12 fights (Rosas Jr. vs Barcelos). The main card locked before the
+build was ready. The **late Captain slate** (8 fights) was entered with the
+model's lineups:
+
+| contest | entries | lineup | points | finish |
+|---|---|---|---|---|
+| cash (double-up) | 20 | CPT Perez, Hernandez, Rosas, Bellato, Vieira, Barcelos | 561.7 | **5th — cashed** |
+| GPP | 118 | CPT Rosas, Nakamura, Osmanli, Bryczek, Edwards, Dumas | 302.5 | 106th |
+
+Three underdogs won — Hiestand (21% to win), Akylbek (25%), Edwards (36%) —
+against ~2.7 expected. The GPP lineup held both losing favourites.
+
+Graded from the exports (DK's own points, the night of the card): 16 fights,
+projection MAE 38.8 against DK's FPPF at 31.1 (n = 11). One card, three
+upsets; the backtest (3,454 fights) is the evidence, and this is one sample of
+it. The simulated spread was on target: 25% of results fell below the
+simulated 25th percentile, 6% above the 90th.
+
+## 7. Second graded slate — 2026-10-03 (Captain Late)
+
+Two model lineups were entered. **GPP 415.8, 585th of ~1,000.** **Cash 442.7, 56th of ~100** (cashed ~50%).
+
+**Status:** No calibration run yet—the 10/3 date has no projection log. Rerun calibration once 10/3 projection log is generated (`scripts/mma_calibration.py --fit-ownership`). Entries came from phone-built lineups using live snapshot data only.
+
+**Note:** MMA has no late-swap window (lock is first fight's bell). Build timing was final—no opportunity to update after initial lock.
