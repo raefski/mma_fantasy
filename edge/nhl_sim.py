@@ -72,6 +72,14 @@ P_OT_GOAL = 0.635
 SHOT_K = 19.4
 BLOCK_K = 11.4
 TEAM_SHOT_K = 70.0
+#: Skater draws run high as a whole: simulated means vs box-score DK points on
+#: the 11 TRAIN nights before 2026-10-13 (lab, 4 seeds, 2,196 skater-games) give
+#: sum(actual)/sum(proj) 0.975 at lock, 0.977 at lock-3h. The excess is spread
+#: over every component (blocks, bonuses, shots, assists; NHL_CRITIQUE_LOG cycle 8)
+#: and the per-player input means land on the box, so it is the simulator's.
+#: Held out (13 nights, 2,962): bias +0.173 -> +0.001, MAE 4.478 -> 4.444,
+#: RMSE 5.970 -> 5.965 at lock; early 4.490 -> 4.458. Ranking unchanged.
+SKATER_SCALE = 0.976
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +156,16 @@ def _win_prob(lh: float, la: float) -> float:
 def _assist_matrix(team_players: list[dict], scorer_p: np.ndarray, targets: np.ndarray,
                    team_goals: float) -> np.ndarray:
     """Row i = P(teammate j is AN assister | i scored). Weights are solved so
-    each skater's expected assists match his target given who scores."""
+    each skater's expected assists match his target given who scores.
+
+    The expectation is the one simulate() draws: a first assister from row q
+    with P1 = 1 - P_UNASSISTED, and with P2 = P1 * P_TWO_ASSISTS a second drawn
+    from the OTHER teammates (row q without the first, renormalised), so
+    P(j is second | i scored) = q_ij * sum_{k != j} q_ik / (1 - q_ik). Until
+    2026-10-22 the solve assumed two independent draws (q_ij * (1 + P_TWO)),
+    which over-credits a high-q assister: on a 12-game slate $7.5k+ skaters were
+    given 0.706 assists and simulated 0.656. NHL_CRITIQUE_LOG.md, runner-ups of
+    cycles 1-2, and the assist fix after them."""
     n = len(team_players)
     aff = np.ones((n, n))
     for i, a in enumerate(team_players):
@@ -160,14 +177,17 @@ def _assist_matrix(team_players: list[dict], scorer_p: np.ndarray, targets: np.n
                 aff[i, j] *= LINE_AFFINITY
             if a.get("pp") and a.get("pp") == b.get("pp"):
                 aff[i, j] *= PP_AFFINITY
-    per_goal = ASSISTS_PER_GOAL
+    p1 = 1 - P_UNASSISTED
+    p2 = p1 * P_TWO_ASSISTS
     # Targets must add up to what the team's goals can carry, or no weights fit.
-    targets = targets * (team_goals * per_goal / max(targets.sum(), 1e-9))
+    targets = targets * (team_goals * ASSISTS_PER_GOAL / max(targets.sum(), 1e-9))
     w = np.maximum(targets, 1e-4).copy()
-    for _ in range(40):
-        rows = aff * w[None, :]
-        rows /= rows.sum(axis=1, keepdims=True).clip(1e-12)
-        expected = team_goals * per_goal * (scorer_p @ rows)
+    for _ in range(60):
+        q = aff * w[None, :]
+        q /= q.sum(axis=1, keepdims=True).clip(1e-12)
+        odds = q / (1 - q).clip(1e-9)
+        second = odds.sum(axis=1, keepdims=True) - odds
+        expected = team_goals * (scorer_p @ (p1 * q + p2 * q * second))
         w *= np.where(expected > 1e-9, targets / expected.clip(1e-9), 1.0)
         w = np.maximum(w, 1e-6)
     rows = aff * w[None, :]
@@ -250,10 +270,16 @@ def simulate(pool: list[dict], games: dict, n_sims: int = 2000, seed: int = 0) -
                 first = _draw(rng, cum_a[scorer], rng.random(k))
                 has1 = n_ast >= 1
                 AS[rows[has1], first[has1]] += 1
-                second = _draw(rng, cum_a[scorer], rng.random(k))
-                clash = second == first
-                second[clash] = _draw(rng, cum_a[scorer[clash]], rng.random(int(clash.sum())))
-                ok2 = (n_ast == 2) & (second != first)
+                # The second assister is one of the OTHER teammates. Until
+                # 2026-10-22 he was redrawn once on a clash with the first and
+                # the assist dropped on a second clash: concentrated rows (line
+                # 4x, PP 3x) lost ~4.5% of every team's assists, so the sim ran
+                # below the 1.689 assists per goal it was fitted to.
+                rest = A[scorer]
+                rest[np.arange(k), first] = 0.0
+                tot = rest.sum(axis=1, keepdims=True)
+                second = _draw(rng, np.cumsum(rest, axis=1) / tot.clip(1e-12), rng.random(k))
+                ok2 = (n_ast == 2) & (tot[:, 0] > 1e-9)
                 AS[rows[ok2], second[ok2]] += 1
             sm = np.array([max(x.get("shots", 0.0) - x.get("goals", 0.0), 0.05) for x in m])
             mu = sm[None, :] * shot_factor[t][:, None]
@@ -279,6 +305,8 @@ def simulate(pool: list[dict], games: dict, n_sims: int = 2000, seed: int = 0) -
                     sa = sa * (target + ga_.mean()) / expected_sa
                 saves = np.maximum(np.rint(sa) - ga_, 0)
                 out[:, i] = nhl.goalie_points(saves, ga_, won[t], ot_loss[t], ga_ == 0)
+    skaters = [i for i, p in enumerate(pool) if p["pos"] != "G"]
+    out[:, skaters] *= SKATER_SCALE
     return out
 
 
