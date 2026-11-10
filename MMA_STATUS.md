@@ -226,15 +226,34 @@ corners of the main event. A lineup-level model cannot do either. It is the "Opt
 Rate" idea from the NFL ownership research (Dan's Projections), and its three
 constants are one grid search away from fitted.
 
+**Held out on 4 slates (2026-11-10, MMA critique cycle 2, `scripts/mma_own_lab.py
+report`).** The model was scored against every DK MMA field in contests.db, with
+contest types tagged by DK, leaving one slate out. That is 9/26 Captain, 10/03,
+10/10 and 11/07: 6 cash contests (371 entries) and 4 GPPs (2,053 entries). The
+boards for 10/03 and 10/10 were rebuilt from the archived book. The shipped constants hold up:
+
+| type | shipped ownership MAE | refit tau, held out | slates better |
+|---|---|---|---|
+| cash | 10.79 | 10.79 (refits 8 every fold) | 0/4 |
+| GPP | 7.50 | 8.04 | 0/4 |
+
+Pooled in-sample, (0.15, τ 8) is the cash minimum and (0.15, τ 16) is within
+0.14 of the GPP minimum, so nothing was changed. Four slates is still not
+enough data. The same lab shows something new. Score the model's field on
+the realised points and its cash line comes out **25 pts below the real
+contest's line on 4 of 4 slates**. The real cash field picks better lineups
+than a softmax on our public projection. The cash objective therefore treats
+the bar as lower than it is.
+
 ## 9. What is NOT validated
 
 | thing | status |
 |---|---|
-| **Ownership / the field** | fitted on **one** slate (a 118-entry GPP and a 20-entry cash game, Captain Mode). Classic main-card ownership is still extrapolated. Every export helps — `scripts/mma_calibration.py --fit-ownership`, cash and GPP separately |
+| **Ownership / the field** | fitted on **one** slate (a 118-entry GPP and a 20-entry cash game, Captain Mode). **Held out on 4 slates (10 contests) 2026-11-10: the fitted constants are not beaten** (`scripts/mma_own_lab.py report`, §8). The cash field's score line runs 25 pts above the model's (4/4 slates). That is unaddressed |
 | **Lineup head-to-head** | the objectives are argued from a calibrated simulation, not from a backtest against real contest results. No historical DK MMA salaries were found. |
 | **Market constants on DK's own lines** | fitted on `ufc-master.csv` prices (a consensus source), applied to DraftKings'. DK's own pre-lock lines are now archived every capture for a refit. |
 | **Salary-implied fallback** | one card, eleven bouts |
-| **Sig-strike / takedown props** | parsed and captured but NOT used: their calibration is unmeasured. Displayed for reference in the log only |
+| **Sig-strike / takedown props** | captured, **measured 2026-11-09 and NOT used**: `scripts/mma_lab.py report` (6 cards, 90 fighters, leave one card out). Blending them in adds +0.16 DK MAE; prop stat points correlate 0.50 with actual vs the model's 0.57, and the sig lines run ~19% above actual sig strikes (MMA_CRITIQUE_LOG.md cycle 1) |
 | **Round-and-Method grid** | parsed, not used for timing: the fitted hazard is validated, the grid's pricing is not |
 | **Captain Mode (169)** | built 2026-09-26 (exhaustive, 48,048 lineups on 8 fights). Same model; the CPT's field ownership is a prior like the rest |
 | **Weight-miss / short-notice effects** | not modelled beyond what the market prices |
